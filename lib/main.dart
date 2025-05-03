@@ -12,11 +12,9 @@ import 'package:uuid/uuid.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:yaml/yaml.dart';
 import 'package:xterm/xterm.dart' as xterm;
-import 'package:flutter/services.dart' show rootBundle;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Register Brainfuck language for syntax highlighting
   highlight.registerLanguage('brainfuck', brainfuckMode);
   runApp(const BrainfuckIDE());
 }
@@ -28,7 +26,26 @@ class BrainfuckIDE extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Brainfuck IDE',
-      theme: ThemeData.dark(),
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.indigo,
+          brightness: Brightness.dark,
+          primary: Colors.indigo,
+          secondary: Colors.amber,
+        ),
+        textTheme: const TextTheme(
+          bodyLarge: TextStyle(fontFamily: 'JetBrainsMono'),
+          bodyMedium: TextStyle(fontFamily: 'JetBrainsMono'),
+          labelLarge: TextStyle(fontFamily: 'JetBrainsMono'),
+        ),
+        scaffoldBackgroundColor: Colors.grey[900],
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Colors.indigo,
+          foregroundColor: Colors.white,
+          elevation: 4,
+        ),
+      ),
       home: const IDEHomePage(),
     );
   }
@@ -57,75 +74,66 @@ class _IDEHomePageState extends State<IDEHomePage> {
   String debugInput = '';
   bool isLightTheme = false;
   final terminalController = xterm.Terminal();
-  Map<String, dynamic> settings = {};
+  Map<String, dynamic> settings = {'fontSize': 14.0, 'keybindings': {}};
   bool isDragging = false;
-  String? tccPath;
+  String? gccPath;
+  double terminalHeight = 200;
+  final FocusNode _editorFocusNode = FocusNode();
+  final TextEditingController _terminalInputController =
+      TextEditingController();
 
   @override
   void initState() {
     super.initState();
-    loadSettings();
-    loadPlugins();
-    openNewTab();
-    terminalController.write('Brainfuck IDE Terminal\n');
-    setupTCC();
+    try {
+      loadSettings();
+      loadPlugins();
+      openNewTab();
+      terminalController.write('\x1b[32mBrainfuck IDE Terminal\x1b[0m\n');
+      setupGcc();
+      terminalController.onInput = (input) {
+        terminalController.write('\r\n\x1b[33m> \x1b[0m$input\r\n');
+        _terminalInputController.text = '';
+        processTerminalCommand(input);
+      };
+    } catch (e) {
+      print('Init error: $e');
+      terminalController.write('\x1b[31mInit error: $e\x1b[0m\n');
+    }
   }
 
-  // Setup TCC compiler
-  Future<void> setupTCC() async {
+  Future<void> setupGcc() async {
     try {
-      final tempDir = await getTemporaryDirectory();
-      final tccDir = Directory('${tempDir.path}/tcc');
-      await tccDir.create(recursive: true);
-
-      const tccAssetPath = 'assets/tcc/tcc_macos';
-      const tccBinaryName = 'tcc';
-
-      // Extract TCC binary
-      final tccBytes = await rootBundle.load(tccAssetPath);
-      final tccFile = File('${tccDir.path}/$tccBinaryName');
-      await tccFile.writeAsBytes(tccBytes.buffer.asUint8List());
-      await Process.run('chmod', ['+x', tccFile.path]);
-
-      // Extract TCC include files
-      const includeFiles = [
-        'lib/include/stddef.h',
-        'lib/include/stdarg.h',
-        'lib/include/stdio.h'
-      ];
-      for (var file in includeFiles) {
-        final bytes = await rootBundle.load('assets/tcc/$file');
-        final outFile = File('${tccDir.path}/$file');
-        await outFile.create(recursive: true);
-        await outFile.writeAsBytes(bytes.buffer.asUint8List());
+      final result = await shell.run('which gcc');
+      if (result.first.exitCode == 0 && result.outText.isNotEmpty) {
+        setState(() {
+          gccPath = result.outText.trim();
+          output = 'GCC compiler initialized';
+          terminalController.write('\x1b[32mGCC compiler initialized\x1b[0m\n');
+        });
+      } else {
+        throw Exception(
+            'GCC not found. Install via Xcode Command Line Tools or Homebrew.');
       }
-
-      setState(() {
-        tccPath = tccFile.path;
-        output = 'TCC compiler initialized';
-        terminalController.write('TCC compiler initialized\n');
-      });
     } catch (e) {
       setState(() {
-        output = 'Failed to initialize TCC: $e';
-        terminalController.write('Failed to initialize TCC: $e\n');
+        output = '\x1b[31mFailed to initialize GCC: $e\x1b[0m';
+        terminalController
+            .write('\x1b[31mFailed to initialize GCC: $e\x1b[0m\n');
       });
     }
   }
 
-  // Load settings
   Future<void> loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
       isLightTheme = prefs.getBool('theme') ?? false;
-      settings = {
-        'fontSize': prefs.getDouble('fontSize') ?? 14.0,
-        'keybindings': jsonDecode(prefs.getString('keybindings') ?? '{}'),
-      };
+      settings['fontSize'] = prefs.getDouble('fontSize') ?? 14.0;
+      settings['keybindings'] =
+          jsonDecode(prefs.getString('keybindings') ?? '{}');
     });
   }
 
-  // Save settings
   Future<void> saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('theme', isLightTheme);
@@ -133,7 +141,6 @@ class _IDEHomePageState extends State<IDEHomePage> {
     await prefs.setString('keybindings', jsonEncode(settings['keybindings']));
   }
 
-  // Load plugins
   Future<void> loadPlugins() async {
     final dir = await getApplicationSupportDirectory();
     final pluginFile = File('${dir.path}/plugins.json');
@@ -145,7 +152,6 @@ class _IDEHomePageState extends State<IDEHomePage> {
     }
   }
 
-  // Install plugin
   Future<void> installPlugin(String pluginPath) async {
     final file = File(pluginPath);
     final content = jsonDecode(await file.readAsString());
@@ -155,33 +161,29 @@ class _IDEHomePageState extends State<IDEHomePage> {
     final dir = await getApplicationSupportDirectory();
     await File('${dir.path}/plugins.json').writeAsString(jsonEncode(plugins));
     setState(() {
-      output = 'Installed plugin: ${content['name']}';
-      terminalController.write('Installed plugin: ${content['name']}\n');
+      output = '\x1b[32mInstalled plugin: ${content['name']}\x1b[0m';
+      terminalController
+          .write('\x1b[32mInstalled plugin: ${content['name']}\x1b[0m\n');
     });
   }
 
-  // Open new editor tab
   void openNewTab({String? path, String? content}) {
     final controller = CodeController(
-      text: content ?? '++++++[>++++++<-]>.',
+      text:
+          content ?? 'class HelloWorld { init() { print("Hello, World!"); } }',
       language: brainfuckMode,
     );
     setState(() {
       tabs.add(EditorTab(
-        path: path ?? '',
-        controller: controller,
-        isSaved: path == null,
-      ));
+          path: path ?? '', controller: controller, isSaved: path == null));
       currentTabIndex = tabs.length - 1;
+      _editorFocusNode.requestFocus();
     });
   }
 
-  // Open file
   Future<void> openFile() async {
-    final result = await FilePicker.platform.pickFiles(
-      allowedExtensions: ['bf'],
-      allowMultiple: false,
-    );
+    final result = await FilePicker.platform
+        .pickFiles(allowedExtensions: ['bf'], allowMultiple: false);
     if (result != null) {
       final file = File(result.files.single.path!);
       final content = await file.readAsString();
@@ -189,60 +191,78 @@ class _IDEHomePageState extends State<IDEHomePage> {
     }
   }
 
-  // Save file
   Future<void> saveFile() async {
     if (currentTabIndex == -1) return;
     final tab = tabs[currentTabIndex];
     if (tab.path.isEmpty) {
-      final result = await FilePicker.platform.saveFile(
-        fileName: 'program.bf',
-        allowedExtensions: ['bf'],
-      );
-      if (result != null) {
+      final result = await FilePicker.platform
+          .saveFile(fileName: 'program.bf', allowedExtensions: ['bf']);
+      if (result != null)
         tab.path = result;
-      } else {
+      else
         return;
-      }
     }
-    await File(tab.path).writeAsString(tab.controller.text);
+    await File(tab.path)
+        .writeAsString(compileOOPtoBrainfuck(tab.controller.text));
     setState(() {
       tab.isSaved = true;
-      output = 'Saved to ${tab.path}';
-      terminalController.write('Saved to ${tab.path}\n');
+      output = '\x1b[32mSaved to ${tab.path}\x1b[0m';
+      terminalController.write('\x1b[32mSaved to ${tab.path}\x1b[0m\n');
     });
   }
 
-  // Create new project
   Future<void> createProject() async {
     final result = await FilePicker.platform.getDirectoryPath();
     if (result != null) {
       final dir = Directory(result);
       await dir.create(recursive: true);
       final projectFile = File('$result/brainfuck.yaml');
-      await projectFile.writeAsString('''
-name: Brainfuck Project
-version: 1.0
-files:
-  - main.bf
-''');
-      await File('$result/main.bf').writeAsString('++++++[>++++++<-]>.');
+      await projectFile.writeAsString(
+          'name: Brainfuck Project\nversion: 1.0\nfiles:\n  - main.bf');
+      await File('$result/main.bf').writeAsString(
+          'class HelloWorld { init() { print("Hello, World!"); } }');
       setState(() {
         projectPath = result;
-        output = 'Created project: $projectPath';
-        terminalController.write('Created project: $projectPath\n');
-        openNewTab(path: '$result/main.bf', content: '++++++[>++++++<-]>.');
+        output = '\x1b[32mCreated project: $projectPath\x1b[0m';
+        terminalController
+            .write('\x1b[32mCreated project: $projectPath\x1b[0m\n');
+        openNewTab(
+            path: '$result/main.bf',
+            content: 'class HelloWorld { init() { print("Hello, World!"); } }');
       });
     }
   }
 
-  // Brainfuck to C compiler with optimization
+  String compileOOPtoBrainfuck(String code) {
+    // Simple OOP preprocessor for Brainfuck
+    final lines = code.split('\n');
+    StringBuffer bfCode = StringBuffer();
+    int memoryOffset = 0;
+
+    for (String line in lines) {
+      line = line.trim();
+      if (line.startsWith('class')) {
+        bfCode.write('>'); // Move to next memory cell for class instance
+        memoryOffset++;
+      } else if (line.contains('init()')) {
+        bfCode.write('[-]'); // Clear current cell for object init
+        memoryOffset++;
+      } else if (line.contains('print(')) {
+        String text =
+            line.substring(line.indexOf('"') + 1, line.lastIndexOf('"'));
+        for (int char in text.codeUnits) {
+          bfCode.write('+'.padLeft(char, '+') + '.>'); // Set and print char
+          memoryOffset++;
+        }
+      }
+    }
+    return bfCode.toString();
+  }
+
   Future<String> compileBrainfuckToC(String bfCode, String outputCPath) async {
     final cCode = StringBuffer();
-    cCode.writeln('#include <stdio.h>');
-    cCode.writeln('int main() {');
-    cCode.writeln('    char array[30000] = {0};');
-    cCode.writeln('    char *ptr = array;');
-
+    cCode.write(
+        '#include <stdio.h>\nint main() {\n    char array[30000] = {0};\n    char *ptr = array;\n');
     int indent = 1;
     int i = 0;
     while (i < bfCode.length) {
@@ -253,100 +273,102 @@ files:
           count += char == '+' ? 1 : -1;
           i++;
         }
-        cCode.writeln('    ' * indent + '*ptr += $count;');
+        cCode.write(' ' * indent * 4 + '*ptr += $count;\n');
       } else if (char == '>' || char == '<') {
         int count = 1;
         while (i + 1 < bfCode.length && bfCode[i + 1] == char) {
           count += char == '>' ? 1 : -1;
           i++;
         }
-        cCode.writeln('    ' * indent + 'ptr += $count;');
+        cCode.write(' ' * indent * 4 + 'ptr += $count;\n');
       } else {
         switch (char) {
           case '.':
-            cCode.writeln('    ' * indent + 'putchar(*ptr);');
+            cCode.write(' ' * indent * 4 + 'putchar(*ptr);\n');
             break;
           case ',':
-            cCode.writeln('    ' * indent + '*ptr = getchar();');
+            cCode.write(' ' * indent * 4 + '*ptr = getchar();\n');
             break;
           case '[':
-            cCode.writeln('    ' * indent + 'while (*ptr) {');
+            cCode.write(' ' * indent * 4 + 'while (*ptr) {\n');
             indent++;
             break;
           case ']':
             indent--;
-            cCode.writeln('    ' * indent + '}');
+            cCode.write(' ' * indent * 4 + '}\n');
             break;
         }
       }
       i++;
     }
-
-    cCode.writeln('    return 0;');
-    cCode.writeln('}');
-
+    cCode.write('    return 0;\n}');
     await File(outputCPath).writeAsString(cCode.toString());
     return outputCPath;
   }
 
-  // Compile to native executable using TCC
   Future<void> compileToNative(String cPath, String outputPath) async {
-    if (tccPath == null) {
+    if (gccPath == null) {
       setState(() {
-        output = 'TCC compiler not initialized';
-        terminalController.write('TCC compiler not initialized\n');
+        output = '\x1b[31mGCC compiler not initialized\x1b[0m';
+        terminalController
+            .write('\x1b[31mGCC compiler not initialized\x1b[0m\n');
       });
       return;
     }
-
-    final tccDir = Directory(tccPath!).parent;
-    final args = [
-      '-I${tccDir.path}/lib/include',
-      cPath,
-      '-o',
-      outputPath,
-    ];
-
+    final args = [cPath, '-o', outputPath];
     try {
-      final result = await shell.run('$tccPath ${args.join(' ')}');
+      final tempDir = await getTemporaryDirectory();
+      final outputFile = File(outputPath);
+      if (await outputFile.exists()) await outputFile.delete();
+      final result =
+          await shell.run('$gccPath ${args.join(' ')}', runInShell: true);
+      if (result.first.exitCode != 0)
+        throw Exception('GCC compilation failed: ${result.errText}');
+      await outputFile.setExecutable(true);
       setState(() {
-        output = 'Compilation successful: $outputPath\n${result.outText}';
-        terminalController
-            .write('Compilation successful: $outputPath\n${result.outText}');
+        output =
+            '\x1b[32mCompilation successful: $outputPath\x1b[0m\n${result.outText}';
+        terminalController.write(
+            '\x1b[32mCompilation successful: $outputPath\x1b[0m\n${result.outText}');
       });
     } catch (e) {
       setState(() {
-        output = 'Compilation failed: $e';
-        terminalController.write('Compilation failed: $e\n');
+        output = '\x1b[31mCompilation failed: $e\x1b[0m';
+        terminalController.write('\x1b[31mCompilation failed: $e\x1b[0m\n');
       });
     }
   }
 
-  // Run code
   Future<void> runCode() async {
     if (currentTabIndex == -1) return;
     final tempDir = await getTemporaryDirectory();
     final cPath = '${tempDir.path}/temp.c';
     final exePath = '${tempDir.path}/temp';
-
-    await compileBrainfuckToC(tabs[currentTabIndex].controller.text, cPath);
+    await compileBrainfuckToC(
+        compileOOPtoBrainfuck(tabs[currentTabIndex].controller.text), cPath);
     await compileToNative(cPath, exePath);
-
+    if (!File(exePath).existsSync()) {
+      setState(() {
+        output = '\x1b[31mExecutable not found: $exePath\x1b[0m';
+        terminalController
+            .write('\x1b[31mExecutable not found: $exePath\x1b[0m\n');
+      });
+      return;
+    }
     try {
-      final result = await shell.run('./$exePath');
+      final result = await shell.run(exePath);
       setState(() {
         output = result.outText;
         terminalController.write(result.outText);
       });
     } catch (e) {
       setState(() {
-        output = 'Execution failed: $e';
-        terminalController.write('Execution failed: $e\n');
+        output = '\x1b[31mExecution failed: $e\x1b[0m';
+        terminalController.write('\x1b[31mExecution failed: $e\x1b[0m\n');
       });
     }
   }
 
-  // Debug code
   void startDebugging() {
     if (currentTabIndex == -1) return;
     setState(() {
@@ -356,32 +378,31 @@ files:
       instructionPointer = 0;
       loopStack = [];
       debugInput = '';
-      output = 'Debugging started';
-      terminalController.write('Debugging started\n');
+      output = '\x1b[32mDebugging started\x1b[0m';
+      terminalController.write('\x1b[32mDebugging started\x1b[0m\n');
     });
   }
 
   void stepDebug() {
     if (!isDebugging || currentTabIndex == -1) return;
-    final code = tabs[currentTabIndex].controller.text;
+    final code = compileOOPtoBrainfuck(tabs[currentTabIndex].controller.text);
     if (instructionPointer >= code.length) {
       setState(() {
         isDebugging = false;
-        output = 'Debugging finished';
-        terminalController.write('Debugging finished\n');
+        output = '\x1b[32mDebugging finished\x1b[0m';
+        terminalController.write('\x1b[32mDebugging finished\x1b[0m\n');
       });
       return;
     }
-
     if (breakpoints.contains(instructionPointer)) {
       setState(() {
-        output = 'Hit breakpoint at instruction $instructionPointer';
-        terminalController
-            .write('Hit breakpoint at instruction $instructionPointer\n');
+        output =
+            '\x1b[33mHit breakpoint at instruction $instructionPointer\x1b[0m';
+        terminalController.write(
+            '\x1b[33mHit breakpoint at instruction $instructionPointer\x1b[0m\n');
       });
       return;
     }
-
     final char = code[instructionPointer];
     switch (char) {
       case '>':
@@ -403,8 +424,8 @@ files:
       case ',':
         if (debugInput.isEmpty) {
           setState(() {
-            output = 'Waiting for input';
-            terminalController.write('Waiting for input\n');
+            output = '\x1b[33mWaiting for input\x1b[0m';
+            terminalController.write('\x1b[33mWaiting for input\x1b[0m\n');
           });
           return;
         }
@@ -423,27 +444,38 @@ files:
         }
         break;
       case ']':
-        if (memory[pointer] != 0) {
+        if (memory[pointer] != 0)
           instructionPointer = loopStack.last;
-        } else {
+        else
           loopStack.removeLast();
-        }
         break;
     }
     instructionPointer++;
     setState(() {
-      output = 'Stepped: ptr=$pointer, mem[$pointer]=${memory[pointer]}';
-      terminalController
-          .write('Stepped: ptr=$pointer, mem[$pointer]=${memory[pointer]}\n');
+      output =
+          '\x1b[36mStepped: ptr=$pointer, mem[$pointer]=${memory[pointer]}\x1b[0m';
+      terminalController.write(
+          '\x1b[36mStepped: ptr=$pointer, mem[$pointer]=${memory[pointer]}\x1b[0m\n');
     });
   }
 
-  // Git operations
+  void processTerminalCommand(String command) {
+    if (command == 'clear') {
+      terminalController.clear();
+      terminalController.write('\x1b[32mBrainfuck IDE Terminal\x1b[0m\n');
+    } else if (command == 'help') {
+      terminalController.write(
+          '\x1b[33mAvailable commands:\n- clear: Clear terminal\n- help: Show this message\x1b[0m\n');
+    } else {
+      terminalController.write('\x1b[31mUnknown command: $command\x1b[0m\n');
+    }
+  }
+
   Future<void> gitCommit() async {
     if (projectPath.isEmpty) {
       setState(() {
-        output = 'No project opened';
-        terminalController.write('No project opened\n');
+        output = '\x1b[31mNo project opened\x1b[0m';
+        terminalController.write('\x1b[31mNo project opened\x1b[0m\n');
       });
       return;
     }
@@ -452,13 +484,13 @@ files:
       await shell.run('git add .');
       await shell.run('git commit -m "Auto-commit from IDE"');
       setState(() {
-        output = 'Committed changes';
-        terminalController.write('Committed changes\n');
+        output = '\x1b[32mCommitted changes\x1b[0m';
+        terminalController.write('\x1b[32mCommitted changes\x1b[0m\n');
       });
     } catch (e) {
       setState(() {
-        output = 'Git commit failed: $e';
-        terminalController.write('Git commit failed: $e\n');
+        output = '\x1b[31mGit commit failed: $e\x1b[0m';
+        terminalController.write('\x1b[31mGit commit failed: $e\x1b[0m\n');
       });
     }
   }
@@ -469,13 +501,13 @@ files:
       final shell = Shell(workingDirectory: projectPath);
       await shell.run('git push origin main');
       setState(() {
-        output = 'Pushed to remote';
-        terminalController.write('Pushed to remote\n');
+        output = '\x1b[32mPushed to remote\x1b[0m';
+        terminalController.write('\x1b[32mPushed to remote\x1b[0m\n');
       });
     } catch (e) {
       setState(() {
-        output = 'Git push failed: $e';
-        terminalController.write('Git push failed: $e\n');
+        output = '\x1b[31mGit push failed: $e\x1b[0m';
+        terminalController.write('\x1b[31mGit push failed: $e\x1b[0m\n');
       });
     }
   }
@@ -486,30 +518,29 @@ files:
       final shell = Shell(workingDirectory: projectPath);
       await shell.run('git pull origin main');
       setState(() {
-        output = 'Pulled from remote';
-        terminalController.write('Pulled from remote\n');
+        output = '\x1b[32mPulled from remote\x1b[0m';
+        terminalController.write('\x1b[32mPulled from remote\x1b[0m\n');
       });
     } catch (e) {
       setState(() {
-        output = 'Git pull failed: $e';
-        terminalController.write('Git pull failed: $e\n');
+        output = '\x1b[31mGit pull failed: $e\x1b[0m';
+        terminalController.write('\x1b[31mGit pull failed: $e\x1b[0m\n');
       });
     }
   }
 
-  // Open project
   Future<void> openProject() async {
     final result = await FilePicker.platform.getDirectoryPath();
     if (result != null) {
       setState(() {
         projectPath = result;
-        output = 'Opened project: $projectPath';
-        terminalController.write('Opened project: $projectPath\n');
+        output = '\x1b[32mOpened project: $projectPath\x1b[0m';
+        terminalController
+            .write('\x1b[32mOpened project: $projectPath\x1b[0m\n');
       });
     }
   }
 
-  // Lint code
   void lintCode(String code) {
     int depth = 0;
     for (var char in code.runes) {
@@ -517,26 +548,25 @@ files:
       if (char == ']'.codeUnitAt(0)) depth--;
       if (depth < 0) {
         setState(() {
-          output = 'Lint error: Unmatched ]';
-          terminalController.write('Lint error: Unmatched ]\n');
+          output = '\x1b[31mLint error: Unmatched ]\x1b[0m';
+          terminalController.write('\x1b[31mLint error: Unmatched ]\x1b[0m\n');
         });
         return;
       }
     }
     if (depth != 0) {
       setState(() {
-        output = 'Lint error: Unmatched [';
-        terminalController.write('Lint error: Unmatched [\n');
+        output = '\x1b[31mLint error: Unmatched [\x1b[0m';
+        terminalController.write('\x1b[31mLint error: Unmatched [\x1b[0m\n');
       });
     } else {
       setState(() {
-        output = 'Lint: No errors';
-        terminalController.write('Lint: No errors\n');
+        output = '\x1b[32mLint: No errors\x1b[0m';
+        terminalController.write('\x1b[32mLint: No errors\x1b[0m\n');
       });
     }
   }
 
-  // Get current line number from controller
   int getCurrentLine(CodeController controller) {
     final text = controller.text;
     final offset = controller.selection.baseOffset;
@@ -550,8 +580,44 @@ files:
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      theme: isLightTheme ? ThemeData.light() : ThemeData.dark(),
+      theme: isLightTheme
+          ? ThemeData(
+              useMaterial3: true,
+              colorScheme: ColorScheme.fromSeed(
+                seedColor: Colors.indigo,
+                brightness: Brightness.light,
+                primary: Colors.indigo,
+                secondary: Colors.amber,
+              ),
+              textTheme: const TextTheme(
+                bodyLarge: TextStyle(fontFamily: 'JetBrainsMono'),
+                bodyMedium: TextStyle(fontFamily: 'JetBrainsMono'),
+                labelLarge: TextStyle(fontFamily: 'JetBrainsMono'),
+              ),
+              scaffoldBackgroundColor: Colors.grey[100],
+              appBarTheme: const AppBarTheme(
+                backgroundColor: Colors.indigo,
+                foregroundColor: Colors.white,
+                elevation: 4,
+              ),
+            )
+          : Theme.of(context),
       home: Scaffold(
+        appBar: AppBar(
+          title: const Text('Brainfuck IDE'),
+          actions: [
+            IconButton(
+              icon: Icon(isLightTheme ? Icons.dark_mode : Icons.light_mode),
+              onPressed: () {
+                setState(() {
+                  isLightTheme = !isLightTheme;
+                  saveSettings();
+                });
+              },
+              tooltip: isLightTheme ? 'Dark Theme' : 'Light Theme',
+            ),
+          ],
+        ),
         body: DropTarget(
           onDragEntered: (_) => setState(() => isDragging = true),
           onDragExited: (_) => setState(() => isDragging = false),
@@ -565,197 +631,218 @@ files:
             setState(() => isDragging = false);
           },
           child: Container(
-            color: isDragging ? Colors.blue.withOpacity(0.2) : null,
+            color: isDragging ? Colors.indigo.withOpacity(0.2) : null,
             child: Column(
               children: [
-                // Top Menu
-                Row(
-                  children: [
-                    TextButton(
-                      onPressed: createProject,
-                      child: const Text('New Project'),
+                Material(
+                  elevation: 4,
+                  child: Container(
+                    color: Theme.of(context).colorScheme.surfaceVariant,
+                    padding: const EdgeInsets.all(8),
+                    child: Row(
+                      children: [
+                        TextButton(
+                            onPressed: createProject,
+                            child: const Text('New Project')),
+                        TextButton(
+                            onPressed: openProject,
+                            child: const Text('Open Project')),
+                        TextButton(
+                            onPressed: saveFile, child: const Text('Save')),
+                        TextButton(
+                            onPressed: runCode, child: const Text('Run')),
+                        TextButton(
+                            onPressed: startDebugging,
+                            child: const Text('Debug')),
+                        TextButton(
+                            onPressed: gitCommit, child: const Text('Commit')),
+                        TextButton(
+                            onPressed: gitPush, child: const Text('Push')),
+                        TextButton(
+                            onPressed: gitPull, child: const Text('Pull')),
+                      ],
                     ),
-                    TextButton(
-                      onPressed: openProject,
-                      child: const Text('Open Project'),
-                    ),
-                    TextButton(
-                      onPressed: saveFile,
-                      child: const Text('Save'),
-                    ),
-                    TextButton(
-                      onPressed: runCode,
-                      child: const Text('Run'),
-                    ),
-                    TextButton(
-                      onPressed: startDebugging,
-                      child: const Text('Debug'),
-                    ),
-                    TextButton(
-                      onPressed: gitCommit,
-                      child: const Text('Commit'),
-                    ),
-                    TextButton(
-                      onPressed: gitPush,
-                      child: const Text('Push'),
-                    ),
-                    TextButton(
-                      onPressed: gitPull,
-                      child: const Text('Pull'),
-                    ),
-                    TextButton(
-                      onPressed: () {
-                        setState(() {
-                          isLightTheme = !isLightTheme;
-                          saveSettings();
-                        });
-                      },
-                      child: Text(isLightTheme ? 'Dark Theme' : 'Light Theme'),
-                    ),
-                  ],
+                  ),
                 ),
                 Expanded(
                   child: Row(
                     children: [
-                      // Sidebar
-                      Container(
-                        width: 60,
-                        color: Colors.grey[900],
-                        child: Column(
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.folder_open),
-                              onPressed: openProject,
-                              tooltip: 'Open Project',
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.save),
-                              onPressed: saveFile,
-                              tooltip: 'Save',
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.play_arrow),
-                              onPressed: runCode,
-                              tooltip: 'Run',
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.bug_report),
-                              onPressed: startDebugging,
-                              tooltip: 'Debug',
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.commit),
-                              onPressed: gitCommit,
-                              tooltip: 'Git Commit',
-                            ),
-                          ],
+                      Material(
+                        elevation: 8,
+                        child: Container(
+                          width: 60,
+                          color: Theme.of(context).colorScheme.surfaceVariant,
+                          child: Column(
+                            children: [
+                              IconButton(
+                                  icon: const Icon(Icons.folder_open),
+                                  onPressed: openProject,
+                                  tooltip: 'Open Project',
+                                  color:
+                                      Theme.of(context).colorScheme.onSurface,
+                                  hoverColor: Theme.of(context)
+                                      .colorScheme
+                                      .primary
+                                      .withOpacity(0.2)),
+                              IconButton(
+                                  icon: const Icon(Icons.save),
+                                  onPressed: saveFile,
+                                  tooltip: 'Save',
+                                  color:
+                                      Theme.of(context).colorScheme.onSurface,
+                                  hoverColor: Theme.of(context)
+                                      .colorScheme
+                                      .primary
+                                      .withOpacity(0.2)),
+                              IconButton(
+                                  icon: const Icon(Icons.play_arrow),
+                                  onPressed: runCode,
+                                  tooltip: 'Run',
+                                  color:
+                                      Theme.of(context).colorScheme.onSurface,
+                                  hoverColor: Theme.of(context)
+                                      .colorScheme
+                                      .primary
+                                      .withOpacity(0.2)),
+                              IconButton(
+                                  icon: const Icon(Icons.bug_report),
+                                  onPressed: startDebugging,
+                                  tooltip: 'Debug',
+                                  color:
+                                      Theme.of(context).colorScheme.onSurface,
+                                  hoverColor: Theme.of(context)
+                                      .colorScheme
+                                      .primary
+                                      .withOpacity(0.2)),
+                              IconButton(
+                                  icon: const Icon(Icons.commit),
+                                  onPressed: gitCommit,
+                                  tooltip: 'Git Commit',
+                                  color:
+                                      Theme.of(context).colorScheme.onSurface,
+                                  hoverColor: Theme.of(context)
+                                      .colorScheme
+                                      .primary
+                                      .withOpacity(0.2)),
+                            ],
+                          ),
                         ),
                       ),
-                      // Project Explorer
-                      Container(
-                        width: 200,
-                        color: Colors.grey[850],
-                        child: projectPath.isEmpty
-                            ? const Center(child: Text('No project opened'))
-                            : FileExplorer(
-                                path: projectPath,
-                                onFileSelected: (path) {
-                                  openNewTab(
-                                      path: path,
-                                      content: File(path).readAsStringSync());
-                                },
-                              ),
+                      Material(
+                        elevation: 4,
+                        child: Container(
+                          width: 200,
+                          color: Theme.of(context).colorScheme.surface,
+                          child: projectPath.isEmpty
+                              ? const Center(
+                                  child: Text('No project opened',
+                                      style: TextStyle(color: Colors.white70)))
+                              : FileExplorer(
+                                  path: projectPath,
+                                  onFileSelected: (path) {
+                                    openNewTab(
+                                        path: path,
+                                        content: File(path).readAsStringSync());
+                                  }),
+                        ),
                       ),
-                      // Main Editor Area
                       Expanded(
                         child: Column(
                           children: [
-                            // Tabs
                             if (tabs.isNotEmpty)
-                              SingleChildScrollView(
-                                scrollDirection: Axis.horizontal,
-                                child: Row(
-                                  children: List.generate(tabs.length, (index) {
-                                    return TabButton(
-                                      title: tabs[index].path.isEmpty
-                                          ? 'Untitled'
-                                          : tabs[index].path.split('/').last,
-                                      isActive: index == currentTabIndex,
-                                      isSaved: tabs[index].isSaved,
-                                      onTap: () {
-                                        setState(() {
-                                          currentTabIndex = index;
-                                          lintCode(tabs[currentTabIndex]
-                                              .controller
-                                              .text);
-                                        });
-                                      },
-                                      onClose: () {
-                                        setState(() {
-                                          tabs.removeAt(index);
-                                          if (currentTabIndex >= tabs.length) {
-                                            currentTabIndex = tabs.length - 1;
-                                          }
-                                        });
-                                      },
-                                    );
-                                  }),
+                              Material(
+                                elevation: 2,
+                                child: SingleChildScrollView(
+                                  scrollDirection: Axis.horizontal,
+                                  child: Row(
+                                    children: List.generate(
+                                        tabs.length,
+                                        (index) => Container(
+                                              decoration: BoxDecoration(
+                                                color: index == currentTabIndex
+                                                    ? Theme.of(context)
+                                                        .colorScheme
+                                                        .primaryContainer
+                                                    : Theme.of(context)
+                                                        .colorScheme
+                                                        .surface,
+                                                borderRadius:
+                                                    BorderRadius.circular(8),
+                                              ),
+                                              margin:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 4,
+                                                      vertical: 2),
+                                              child: TabButton(
+                                                title: tabs[index].path.isEmpty
+                                                    ? 'Untitled'
+                                                    : tabs[index]
+                                                        .path
+                                                        .split('/')
+                                                        .last,
+                                                isActive:
+                                                    index == currentTabIndex,
+                                                isSaved: tabs[index].isSaved,
+                                                onTap: () {
+                                                  setState(() {
+                                                    currentTabIndex = index;
+                                                    lintCode(
+                                                        tabs[currentTabIndex]
+                                                            .controller
+                                                            .text);
+                                                    _editorFocusNode
+                                                        .requestFocus();
+                                                  });
+                                                },
+                                                onClose: () {
+                                                  setState(() {
+                                                    tabs.removeAt(index);
+                                                    if (currentTabIndex >=
+                                                        tabs.length)
+                                                      currentTabIndex =
+                                                          tabs.length - 1;
+                                                  });
+                                                },
+                                              ),
+                                            )),
+                                  ),
                                 ),
                               ),
-                            // Editor with Breakpoint Indicators
                             Expanded(
                               child: currentTabIndex == -1
                                   ? const Center(child: Text('No file opened'))
-                                  : Stack(
-                                      children: [
-                                        CodeTheme(
-                                          data: CodeThemeData(
-                                              styles: monokaiTheme),
-                                          child: CodeField(
-                                            controller: tabs[currentTabIndex]
-                                                .controller,
-                                            gutterStyle: const GutterStyle(),
-                                            textStyle: TextStyle(
-                                                fontSize: settings['fontSize']),
-                                          ),
-                                        ),
-                                        Positioned(
-                                          left: 0,
-                                          top: 0,
-                                          bottom: 0,
-                                          width: 10,
-                                          child: CustomPaint(
-                                            painter: BreakpointPainter(
-                                              breakpoints: breakpoints,
-                                              lineHeight:
-                                                  settings['fontSize'] * 1.5,
-                                              controller: tabs[currentTabIndex]
-                                                  .controller,
-                                            ),
-                                          ),
-                                        ),
-                                        GestureDetector(
-                                          onDoubleTap: () {
-                                            final line = getCurrentLine(
-                                                tabs[currentTabIndex]
-                                                    .controller);
-                                            setState(() {
-                                              if (breakpoints.contains(line)) {
-                                                breakpoints.remove(line);
-                                              } else {
-                                                breakpoints.add(line);
-                                              }
-                                            });
-                                          },
-                                        ),
-                                      ],
+                                  : Focus(
+                                      focusNode: _editorFocusNode,
+                                      child: CodeField(
+                                        controller:
+                                            tabs[currentTabIndex].controller,
+                                        gutterStyle: const GutterStyle(),
+                                        textStyle: TextStyle(
+                                            fontSize: settings['fontSize'],
+                                            color: Colors.white),
+                                        background: Colors.grey[900],
+                                        minLines: null,
+                                        maxLines: null,
+                                        expands: true,
+                                        readOnly: false,
+                                        onChanged: (value) {
+                                          print('Text changed: $value');
+                                          lintCode(value);
+                                        },
+                                      ),
                                     ),
                             ),
-                            // Terminal/Debug Panel
                             Container(
-                              height: 200,
-                              color: Colors.black87,
-                              child: Row(
+                              height: terminalHeight,
+                              decoration: BoxDecoration(
+                                border: Border(
+                                    top: BorderSide(
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .primary,
+                                        width: 1)),
+                              ),
+                              child: Column(
                                 children: [
                                   Expanded(
                                     child: xterm.TerminalView(
@@ -763,38 +850,50 @@ files:
                                       theme: isLightTheme
                                           ? lightTerminalTheme
                                           : darkTerminalTheme,
+                                      // maxLines: 1000,
                                     ),
                                   ),
-                                  if (isDebugging)
-                                    Column(
+                                  Container(
+                                    padding: const EdgeInsets.all(4),
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .surfaceVariant,
+                                    child: Row(
                                       children: [
-                                        Text('Pointer: $pointer'),
-                                        Text(
-                                            'Memory[$pointer]: ${memory[pointer]}'),
-                                        Text('Stack: ${loopStack.join(', ')}'),
-                                        TextField(
-                                          onChanged: (value) =>
-                                              debugInput = value,
-                                          decoration: const InputDecoration(
-                                              labelText: 'Debug Input'),
+                                        Expanded(
+                                          child: TextField(
+                                            controller:
+                                                _terminalInputController,
+                                            decoration: InputDecoration(
+                                              hintText: 'Enter command...',
+                                              border: OutlineInputBorder(
+                                                  borderRadius:
+                                                      BorderRadius.circular(4)),
+                                              contentPadding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 8),
+                                            ),
+                                            onSubmitted: (value) {
+                                              terminalController.write(
+                                                  '\r\n\x1b[33m> \x1b[0m$value\r\n');
+                                              processTerminalCommand(value);
+                                              _terminalInputController.clear();
+                                            },
+                                          ),
                                         ),
-                                        ElevatedButton(
-                                          onPressed: stepDebug,
-                                          child: const Text('Step'),
-                                        ),
-                                        ElevatedButton(
+                                        IconButton(
+                                          icon: const Icon(Icons.send),
                                           onPressed: () {
-                                            setState(() {
-                                              isDebugging = false;
-                                              output = 'Debugging stopped';
-                                              terminalController
-                                                  .write('Debugging stopped\n');
-                                            });
+                                            terminalController.write(
+                                                '\r\n\x1b[33m> \x1b[0m${_terminalInputController.text}\r\n');
+                                            processTerminalCommand(
+                                                _terminalInputController.text);
+                                            _terminalInputController.clear();
                                           },
-                                          child: const Text('Stop'),
                                         ),
                                       ],
                                     ),
+                                  ),
                                 ],
                               ),
                             ),
@@ -804,18 +903,20 @@ files:
                     ],
                   ),
                 ),
-                // Status Bar
-                Container(
-                  color: Colors.grey[900],
-                  padding: const EdgeInsets.all(4),
-                  child: Row(
-                    children: [
-                      Text(currentTabIndex == -1
-                          ? ''
-                          : 'Line ${getCurrentLine(tabs[currentTabIndex].controller)}'),
-                      const Spacer(),
-                      Text(projectPath.isEmpty ? 'No project' : projectPath),
-                    ],
+                Material(
+                  elevation: 2,
+                  child: Container(
+                    color: Theme.of(context).colorScheme.surfaceVariant,
+                    padding: const EdgeInsets.all(4),
+                    child: Row(
+                      children: [
+                        Text(currentTabIndex == -1
+                            ? ''
+                            : 'Line ${getCurrentLine(tabs[currentTabIndex].controller)}'),
+                        const Spacer(),
+                        Text(projectPath.isEmpty ? 'No project' : projectPath),
+                      ],
+                    ),
                   ),
                 ),
               ],
@@ -827,7 +928,6 @@ files:
   }
 }
 
-// Editor tab model
 class EditorTab {
   String path;
   CodeController controller;
@@ -837,7 +937,6 @@ class EditorTab {
       {required this.path, required this.controller, required this.isSaved});
 }
 
-// File explorer widget
 class FileExplorer extends StatelessWidget {
   final String path;
   final Function(String) onFileSelected;
@@ -853,23 +952,23 @@ class FileExplorer extends StatelessWidget {
           .where((f) => f.path.endsWith('.bf'))
           .toList(),
       builder: (context, snapshot) {
-        if (!snapshot.hasData) return const CircularProgressIndicator();
+        if (!snapshot.hasData)
+          return const Center(child: CircularProgressIndicator());
         final files = snapshot.data!;
         return ListView.builder(
           itemCount: files.length,
-          itemBuilder: (context, index) {
-            return ListTile(
-              title: Text(files[index].path.split('/').last),
-              onTap: () => onFileSelected(files[index].path),
-            );
-          },
+          itemBuilder: (context, index) => ListTile(
+            title: Text(files[index].path.split('/').last,
+                style: Theme.of(context).textTheme.bodyMedium),
+            onTap: () => onFileSelected(files[index].path),
+            hoverColor: Theme.of(context).colorScheme.primary.withOpacity(0.1),
+          ),
         );
       },
     );
   }
 }
 
-// Tab button widget
 class TabButton extends StatelessWidget {
   final String title;
   final bool isActive;
@@ -877,57 +976,58 @@ class TabButton extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onClose;
 
-  const TabButton({
-    super.key,
-    required this.title,
-    required this.isActive,
-    required this.isSaved,
-    required this.onTap,
-    required this.onClose,
-  });
+  const TabButton(
+      {super.key,
+      required this.title,
+      required this.isActive,
+      required this.isSaved,
+      required this.onTap,
+      required this.onClose});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: isActive ? Colors.grey[800] : Colors.grey[900],
+      margin: const EdgeInsets.symmetric(horizontal: 2),
       child: Row(
         children: [
           GestureDetector(
             onTap: onTap,
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              child: Text(isSaved ? title : '$title *'),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Text(isSaved ? title : '$title *',
+                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                        color: isActive
+                            ? Theme.of(context).colorScheme.onPrimaryContainer
+                            : Theme.of(context).colorScheme.onSurface,
+                      )),
             ),
           ),
           IconButton(
-            icon: const Icon(Icons.close, size: 16),
-            onPressed: onClose,
-          ),
+              icon: const Icon(Icons.close, size: 16),
+              onPressed: onClose,
+              color: Theme.of(context).colorScheme.onSurface,
+              hoverColor: Theme.of(context).colorScheme.error.withOpacity(0.2)),
         ],
       ),
     );
   }
 }
 
-// Brainfuck language definition
 final brainfuckMode = Mode(
   contains: [
-    Mode(
-      className: 'keyword',
-      begin: r'[+\-<>[\].,]',
-    ),
-    Mode(
-      className: 'comment',
-      begin: r'[^+\-<>[\].,]',
-    ),
+    Mode(className: 'keyword', begin: r'[+\-<>[\].,]'),
+    Mode(className: 'comment', begin: r'[^+\-<>[\].,]'),
+    Mode(className: 'class', begin: r'class\s+\w+'),
+    Mode(className: 'method', begin: r'\w+\(\)'),
   ],
 );
 
-// Monokai theme for editor
 const monokaiTheme = {
   'keyword': TextStyle(color: Colors.purple),
   'comment': TextStyle(color: Colors.grey),
-  'root': TextStyle(backgroundColor: Colors.black, color: Colors.white),
+  'class': TextStyle(color: Colors.blue),
+  'method': TextStyle(color: Colors.green),
+  'root': TextStyle(backgroundColor: Colors.grey, color: Colors.white),
 };
 
 const Color magenta = Color(0xFFFF00FF);
@@ -942,7 +1042,7 @@ final lightTerminalTheme = xterm.TerminalTheme(
   green: Colors.green,
   yellow: Colors.yellow,
   blue: Colors.blue,
-  magenta: magenta, // <-- use custom color here
+  magenta: magenta,
   cyan: Colors.cyan,
   white: Colors.white,
   brightBlack: Colors.grey,
@@ -950,7 +1050,7 @@ final lightTerminalTheme = xterm.TerminalTheme(
   brightGreen: Colors.greenAccent,
   brightYellow: Colors.yellowAccent,
   brightBlue: Colors.blueAccent,
-  brightMagenta: Colors.pinkAccent, // No magentaAccent; use pinkAccent instead
+  brightMagenta: Colors.pinkAccent,
   brightCyan: Colors.cyanAccent,
   brightWhite: Colors.white70,
   searchHitBackground: Colors.yellow.withOpacity(0.4),
@@ -984,24 +1084,21 @@ final darkTerminalTheme = xterm.TerminalTheme(
   searchHitForeground: Colors.black,
 );
 
-// Custom painter for breakpoint indicators
 class BreakpointPainter extends CustomPainter {
   final Set<int> breakpoints;
   final double lineHeight;
   final CodeController controller;
 
-  BreakpointPainter({
-    required this.breakpoints,
-    required this.lineHeight,
-    required this.controller,
-  });
+  BreakpointPainter(
+      {required this.breakpoints,
+      required this.lineHeight,
+      required this.controller});
 
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
       ..color = Colors.red
       ..style = PaintingStyle.fill;
-
     for (var line in breakpoints) {
       final y = (line - 1) * lineHeight;
       canvas.drawCircle(Offset(5, y + lineHeight / 2), 4, paint);
@@ -1009,8 +1106,18 @@ class BreakpointPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(BreakpointPainter oldDelegate) {
-    return breakpoints != oldDelegate.breakpoints ||
-        lineHeight != oldDelegate.lineHeight;
+  bool shouldRepaint(BreakpointPainter oldDelegate) =>
+      breakpoints != oldDelegate.breakpoints ||
+      lineHeight != oldDelegate.lineHeight;
+}
+
+extension FileExtension on File {
+  Future<void> setExecutable(bool executable) async {
+    final path = this.path;
+    try {
+      await Process.run('chmod', [executable ? '+x' : '-x', path]);
+    } catch (e) {
+      print('Failed to set executable: $e');
+    }
   }
 }

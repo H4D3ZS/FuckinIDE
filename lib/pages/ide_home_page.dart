@@ -6,7 +6,7 @@ import 'package:highlight/languages/all.dart';
 import 'package:highlight/highlight.dart' show Node, Mode, highlight;
 import '../models/editor_tab.dart';
 import '../widgets/file_explorer.dart';
-import '../services/compiler_service.dart';
+import '../services/easybf_compiler.dart';
 import '../services/debug_service.dart';
 import '../services/project_service.dart';
 import '../services/git_service.dart';
@@ -27,7 +27,7 @@ class _IDEHomePageState extends State<IDEHomePage> {
   int currentTabIndex = -1;
   String projectPath = '';
   String output = '';
-  String liveOutput = '';
+  String compilationOutput = '';
   List<String> errors = [];
   Map<String, dynamic> plugins = {};
   bool isDebugging = false;
@@ -43,20 +43,21 @@ class _IDEHomePageState extends State<IDEHomePage> {
   String _currentTab = 'Terminal'; // Terminal, Problems, Output
 
   final ProjectService _projectService = ProjectService();
-  final CompilerService _compilerService = CompilerService();
+  final EasyBFCompiler _compilerService = EasyBFCompiler();
   final DebugService _debugService = DebugService();
   final GitService _gitService = GitService();
   final PluginService _pluginService = PluginService();
   final SettingsService _settingsService = SettingsService();
 
-  // Define EasyBF language for syntax highlighting
+  // Define EasyBF language for syntax highlighting with new syntax
   final Mode easybf = Mode(
     ref: 'easybf',
     aliases: ['easybf', 'eb'],
     contains: [
       Mode(
         className: 'keyword',
-        begin: r'\+(CLASS|METHOD|VAR|OBJ|LOOP|-END)|CALL|SET|OUT|OUTVAR',
+        begin:
+            r'\+(CLASS|METHOD|VAR|OBJ|LOOP|-END)|CALL|SET|OUT|OUTVAR|func|if|while|writeFile|readFile|sendRequest|runCommand|print',
         relevance: 10,
       ),
       Mode(
@@ -67,6 +68,11 @@ class _IDEHomePageState extends State<IDEHomePage> {
       Mode(
         className: 'number',
         begin: r'\b\d+\b',
+        relevance: 0,
+      ),
+      Mode(
+        className: 'string',
+        begin: r'"[^"]*"',
         relevance: 0,
       ),
       Mode(
@@ -106,19 +112,7 @@ class _IDEHomePageState extends State<IDEHomePage> {
           );
           controller.addListener(() {
             if (currentTabIndex >= 0 && currentTabIndex < tabs.length) {
-              try {
-                final bfCode = _compilerService.compileEasyBFToBrainfuck(
-                    tabs[currentTabIndex].controller.text);
-                setState(() {
-                  liveOutput = _compilerService.getLiveOutput();
-                  // Remove reliance on getErrors
-                });
-              } catch (e) {
-                setState(() {
-                  liveOutput = 'Error: $e';
-                  errors.add('Error: $e');
-                });
-              }
+              _lintCode(tabs[currentTabIndex].controller.text);
             }
           });
           tabs.add(EditorTab(
@@ -128,12 +122,6 @@ class _IDEHomePageState extends State<IDEHomePage> {
         });
       });
       terminal.write('Brainfuck IDE Terminal\n');
-      await _compilerService.setupGcc((_, output) {
-        setState(() {
-          this.output = output;
-          terminal.write(output);
-        });
-      });
     } catch (e) {
       print('Init error: $e');
       terminal.write('\x1b[31mInit error: $e\x1b[0m\n');
@@ -160,17 +148,20 @@ class _IDEHomePageState extends State<IDEHomePage> {
       if (line.isEmpty || line.startsWith('#')) continue;
       if (line.startsWith('+CLASS') ||
           line.startsWith('+METHOD') ||
-          line.startsWith('+LOOP')) {
+          line.startsWith('+LOOP') ||
+          line.startsWith('func') ||
+          line.contains('{')) {
         depth++;
-      } else if (line == '-END') {
+      } else if (line == '-END' || line == '}') {
         depth--;
       }
       if (depth < 0) {
         setState(() {
-          output = '\x1b[31mLint error at line ${i + 1}: Unmatched -END\x1b[0m';
+          output =
+              '\x1b[31mLint error at line ${i + 1}: Unmatched closing\x1b[0m';
           terminal.write(
-              '\x1b[31mLint error at line ${i + 1}: Unmatched -END\x1b[0m\n');
-          errors.add('Lint error at line ${i + 1}: Unmatched -END');
+              '\x1b[31mLint error at line ${i + 1}: Unmatched closing\x1b[0m\n');
+          errors.add('Lint error at line ${i + 1}: Unmatched closing');
         });
         return;
       }
@@ -202,7 +193,7 @@ class _IDEHomePageState extends State<IDEHomePage> {
         continue;
       }
 
-      if (line == '-END') {
+      if (line == '-END' || line == '}') {
         indentLevel = (indentLevel - 1).clamp(0, indentLevel);
       }
 
@@ -211,7 +202,9 @@ class _IDEHomePageState extends State<IDEHomePage> {
 
       if (line.startsWith('+CLASS') ||
           line.startsWith('+METHOD') ||
-          line.startsWith('+LOOP')) {
+          line.startsWith('+LOOP') ||
+          line.startsWith('func') ||
+          line.contains('{')) {
         indentLevel++;
       }
     }
@@ -235,11 +228,36 @@ class _IDEHomePageState extends State<IDEHomePage> {
       final lines = controller.text.split('\n');
       int charOffset = 0;
       for (int i = 0; i < lineNumber - 1 && i < lines.length; i++) {
-        charOffset += lines[i].length + 1; // +1 for the newline
+        charOffset += lines[i].length + 1;
       }
       controller.selection =
           TextSelection.fromPosition(TextPosition(offset: charOffset));
       _editorFocusNode.requestFocus();
+    }
+  }
+
+  void _compileAndSave() {
+    if (currentTabIndex >= 0 && currentTabIndex < tabs.length) {
+      final tempDir = Directory.systemTemp;
+      final outputPath =
+          '${tempDir.path}/malware${Platform.operatingSystem == 'windows' ? '.exe' : Platform.operatingSystem == 'macos' ? '.app' : ''}';
+      _compilerService
+          .compileToNative(tabs[currentTabIndex].controller.text, outputPath)
+          .then((_) {
+        setState(() {
+          compilationOutput = _compilerService.getOutput();
+          terminal.write(_compilerService.getOutput());
+          if (_compilerService.getErrors().isEmpty) {
+            terminal.write('Run the generated executable at $outputPath\n');
+          } else {
+            errors.addAll(_compilerService.getErrors());
+            terminal
+                .write('Errors: ${_compilerService.getErrors().join('\n')}\n');
+          }
+        });
+      });
+    } else {
+      terminal.write('\x1b[31mNo file selected to compile\x1b[0m\n');
     }
   }
 
@@ -277,7 +295,7 @@ class _IDEHomePageState extends State<IDEHomePage> {
       ),
       home: Scaffold(
         appBar: AppBar(
-          title: const Text('Brainfuck IDE',
+          title: const Text('Fuckin`IDE',
               style: TextStyle(fontWeight: FontWeight.bold)),
           actions: [
             IconButton(
@@ -297,7 +315,7 @@ class _IDEHomePageState extends State<IDEHomePage> {
           onDragExited: (_) => setState(() => isDragging = false),
           onDragDone: (details) {
             final file = File(details.files.first.path);
-            if (file.path.endsWith('.bf')) {
+            if (file.path.endsWith('.bf') || file.path.endsWith('.easybf')) {
               _projectService.openNewTab((path, content) {
                 setState(() {
                   final controller = CodeController(
@@ -306,20 +324,7 @@ class _IDEHomePageState extends State<IDEHomePage> {
                   );
                   controller.addListener(() {
                     if (currentTabIndex >= 0 && currentTabIndex < tabs.length) {
-                      try {
-                        final bfCode =
-                            _compilerService.compileEasyBFToBrainfuck(
-                                tabs[currentTabIndex].controller.text);
-                        setState(() {
-                          liveOutput = _compilerService.getLiveOutput();
-                          // Remove reliance on getErrors
-                        });
-                      } catch (e) {
-                        setState(() {
-                          liveOutput = 'Error: $e';
-                          errors.add('Error: $e');
-                        });
-                      }
+                      _lintCode(tabs[currentTabIndex].controller.text);
                     }
                   });
                   tabs.add(EditorTab(
@@ -366,40 +371,40 @@ class _IDEHomePageState extends State<IDEHomePage> {
                         ),
                         IconButton(
                           icon: const Icon(Icons.save, size: 20),
-                          onPressed: () => _projectService
-                              .saveFile(tabs, currentTabIndex, (newOutput) {
-                            setState(() {
-                              output = newOutput;
-                              terminal.write(newOutput);
-                            });
-                          }, _compilerService.compileEasyBFToBrainfuck),
+                          onPressed: () => _projectService.saveFile(
+                            tabs,
+                            currentTabIndex,
+                            (newOutput) {
+                              setState(() {
+                                output = newOutput;
+                                terminal.write(newOutput);
+                              });
+                            },
+                          ), // Pass null as the compileFunction
                           tooltip: 'Save',
                           color: Colors.white70,
                           padding: const EdgeInsets.all(8),
                         ),
                         IconButton(
                           icon: const Icon(Icons.play_arrow, size: 20),
-                          onPressed: () => _compilerService
-                              .runCode(tabs, currentTabIndex, (newOutput) {
-                            setState(() {
-                              output = newOutput;
-                              terminal.write(newOutput);
-                            });
-                          }),
-                          tooltip: 'Run',
+                          onPressed: _compileAndSave,
+                          tooltip: 'Compile to Native',
                           color: Colors.white70,
                           padding: const EdgeInsets.all(8),
                         ),
                         IconButton(
                           icon: const Icon(Icons.bug_report, size: 20),
                           onPressed: () => _debugService.startDebugging(
-                              tabs, currentTabIndex, (newOutput) {
-                            setState(() {
-                              isDebugging = true;
-                              output = newOutput;
-                              terminal.write(newOutput);
-                            });
-                          }, _compilerService.compileEasyBFToBrainfuck),
+                            tabs,
+                            currentTabIndex,
+                            (newOutput) {
+                              setState(() {
+                                isDebugging = true;
+                                output = newOutput;
+                                terminal.write(newOutput);
+                              });
+                            },
+                          ), // Pass null as the compileFunction
                           tooltip: 'Debug',
                           color: Colors.white70,
                           padding: const EdgeInsets.all(8),
@@ -451,33 +456,17 @@ class _IDEHomePageState extends State<IDEHomePage> {
                                                   final controller =
                                                       CodeController(
                                                     text:
-                                                        '+CLASS Hello\n  +METHOD init\n    OUT 72  # H\n    OUT 101 # e\n    OUT 108 # l\n    OUT 108 # l\n    OUT 111 # o\n  -END\n-END\n+OBJ Hello hello\nCALL hello.init',
+                                                        '+CLASS Hello\n  +METHOD init\n    print("Hello, World!")\n  -END\n-END\n+OBJ Hello hello\nCALL hello.init',
                                                     language: easybf,
                                                   );
                                                   controller.addListener(() {
                                                     if (currentTabIndex >= 0 &&
                                                         currentTabIndex <
                                                             tabs.length) {
-                                                      try {
-                                                        final bfCode = _compilerService
-                                                            .compileEasyBFToBrainfuck(
-                                                                tabs[currentTabIndex]
-                                                                    .controller
-                                                                    .text);
-                                                        setState(() {
-                                                          liveOutput =
-                                                              _compilerService
-                                                                  .getLiveOutput();
-                                                          // Remove reliance on getErrors
-                                                        });
-                                                      } catch (e) {
-                                                        setState(() {
-                                                          liveOutput =
-                                                              'Error: $e';
-                                                          errors
-                                                              .add('Error: $e');
-                                                        });
-                                                      }
+                                                      _lintCode(
+                                                          tabs[currentTabIndex]
+                                                              .controller
+                                                              .text);
                                                     }
                                                   });
                                                   tabs.add(EditorTab(
@@ -490,9 +479,9 @@ class _IDEHomePageState extends State<IDEHomePage> {
                                                       .requestFocus();
                                                 });
                                               },
-                                                  path: '$path/main.bf',
+                                                  path: '$path/main.easybf',
                                                   content:
-                                                      '+CLASS Hello\n  +METHOD init\n    OUT 72  # H\n    OUT 101 # e\n    OUT 108 # l\n    OUT 108 # l\n    OUT 111 # o\n  -END\n-END\n+OBJ Hello hello\nCALL hello.init');
+                                                      '+CLASS Hello\n  +METHOD init\n    print("Hello, World!")\n  -END\n-END\n+OBJ Hello hello\nCALL hello.init');
                                             });
                                           })),
                                   const SizedBox(width: 8),
@@ -510,40 +499,32 @@ class _IDEHomePageState extends State<IDEHomePage> {
                                   _buildToolbarButton(
                                       'Save',
                                       () => _projectService.saveFile(
-                                              tabs, currentTabIndex,
-                                              (newOutput) {
-                                            setState(() {
-                                              output = newOutput;
-                                              terminal.write(newOutput);
-                                            });
-                                          },
-                                              _compilerService
-                                                  .compileEasyBFToBrainfuck)),
+                                            tabs,
+                                            currentTabIndex,
+                                            (newOutput) {
+                                              setState(() {
+                                                output = newOutput;
+                                                terminal.write(newOutput);
+                                              });
+                                            },
+                                          )), // Pass null as the compileFunction
                                   const SizedBox(width: 8),
                                   _buildToolbarButton(
-                                      'Run',
-                                      () => _compilerService
-                                              .runCode(tabs, currentTabIndex,
-                                                  (newOutput) {
-                                            setState(() {
-                                              output = newOutput;
-                                              terminal.write(newOutput);
-                                            });
-                                          })),
+                                      'Compile', _compileAndSave),
                                   const SizedBox(width: 8),
                                   _buildToolbarButton(
                                       'Debug',
                                       () => _debugService.startDebugging(
-                                              tabs, currentTabIndex,
-                                              (newOutput) {
-                                            setState(() {
-                                              isDebugging = true;
-                                              output = newOutput;
-                                              terminal.write(newOutput);
-                                            });
-                                          },
-                                              _compilerService
-                                                  .compileEasyBFToBrainfuck)),
+                                            tabs,
+                                            currentTabIndex,
+                                            (newOutput) {
+                                              setState(() {
+                                                isDebugging = true;
+                                                output = newOutput;
+                                                terminal.write(newOutput);
+                                              });
+                                            },
+                                          )), // Pass null as the compileFunction
                                   const SizedBox(width: 8),
                                   _buildToolbarButton(
                                       'Commit',
@@ -632,24 +613,10 @@ class _IDEHomePageState extends State<IDEHomePage> {
                                                 if (currentTabIndex >= 0 &&
                                                     currentTabIndex <
                                                         tabs.length) {
-                                                  try {
-                                                    final bfCode = _compilerService
-                                                        .compileEasyBFToBrainfuck(
-                                                            tabs[currentTabIndex]
-                                                                .controller
-                                                                .text);
-                                                    setState(() {
-                                                      liveOutput =
-                                                          _compilerService
-                                                              .getLiveOutput();
-                                                      // Remove reliance on getErrors
-                                                    });
-                                                  } catch (e) {
-                                                    setState(() {
-                                                      liveOutput = 'Error: $e';
-                                                      errors.add('Error: $e');
-                                                    });
-                                                  }
+                                                  _lintCode(
+                                                      tabs[currentTabIndex]
+                                                          .controller
+                                                          .text);
                                                 }
                                               });
                                               tabs.add(EditorTab(
@@ -790,6 +757,9 @@ class _IDEHomePageState extends State<IDEHomePage> {
                                                     'number': TextStyle(
                                                         color:
                                                             Colors.orange[400]),
+                                                    'string': TextStyle(
+                                                        color:
+                                                            Colors.yellow[400]),
                                                     'comment': TextStyle(
                                                         color:
                                                             Colors.grey[500]),
@@ -806,33 +776,7 @@ class _IDEHomePageState extends State<IDEHomePage> {
                                                               'JetBrainsMono',
                                                           fontSize: 14),
                                                       onChanged: (value) {
-                                                        print(
-                                                            'Text changed: $value');
                                                         _lintCode(value);
-                                                        if (currentTabIndex >=
-                                                                0 &&
-                                                            currentTabIndex <
-                                                                tabs.length) {
-                                                          try {
-                                                            final bfCode =
-                                                                _compilerService
-                                                                    .compileEasyBFToBrainfuck(
-                                                                        value);
-                                                            setState(() {
-                                                              liveOutput =
-                                                                  _compilerService
-                                                                      .getLiveOutput();
-                                                              // Remove reliance on getErrors
-                                                            });
-                                                          } catch (e) {
-                                                            setState(() {
-                                                              liveOutput =
-                                                                  'Error: $e';
-                                                              errors.add(
-                                                                  'Error: $e');
-                                                            });
-                                                          }
-                                                        }
                                                       },
                                                     ),
                                                   ),
@@ -848,7 +792,7 @@ class _IDEHomePageState extends State<IDEHomePage> {
                                                   CrossAxisAlignment.start,
                                               children: [
                                                 const Text(
-                                                  'Live Output',
+                                                  'Compilation Output',
                                                   style: TextStyle(
                                                     color: Colors.white,
                                                     fontWeight: FontWeight.bold,
@@ -862,13 +806,13 @@ class _IDEHomePageState extends State<IDEHomePage> {
                                                 Expanded(
                                                   child: SingleChildScrollView(
                                                     child: Text(
-                                                      liveOutput.isEmpty
+                                                      compilationOutput.isEmpty
                                                           ? 'No output'
-                                                          : liveOutput,
+                                                          : compilationOutput,
                                                       style: TextStyle(
-                                                        color: liveOutput
-                                                                .startsWith(
-                                                                    'Error:')
+                                                        color: compilationOutput
+                                                                .contains(
+                                                                    'failed')
                                                             ? Colors.red
                                                             : Colors.white,
                                                         fontFamily:

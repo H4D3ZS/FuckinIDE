@@ -28,5 +28,11 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.inherit</key>
+	<true/>
+	<key>EntitlementsFile</key>
+	<string>$(SRCROOT)/Runner/DebugProfile.entitlements</string>
 </dict>
 </plist>

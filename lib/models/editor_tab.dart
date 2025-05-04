@@ -12,8 +12,7 @@ class EditorTab {
       required this.isSaved})
       : controller = controller ??
             CodeController(
-                text: 'class HelloWorld { init() { print("Hello, World!"); } }',
-                language: brainfuckMode);
+                text: 'Brain Fuck Programming', language: brainfuckMode);
 }
 
 // import 'package:flutter_code_editor/flutter_code_editor.dart';

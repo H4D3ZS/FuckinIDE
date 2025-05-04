@@ -8,8 +8,7 @@ class ProjectService {
   void openNewTab(Function(String?, CodeController?) callback,
       {String? path, String? content}) {
     final controller = CodeController(
-      text:
-          content ?? 'class HelloWorld { init() { print("Hello, World!"); } }',
+      text: content ?? '',
       language: brainfuckMode,
     );
     callback(path, controller);
@@ -26,26 +25,27 @@ class ProjectService {
     }
   }
 
-  Future<void> saveFile(
-      List<EditorTab> tabs,
-      int currentTabIndex,
-      Function(String) callback,
-      String Function(String) compileOOPtoBrainfuck) async {
-    if (currentTabIndex == -1) return;
-    final tab = tabs[currentTabIndex];
-    if (tab.path.isEmpty) {
-      final result = await FilePicker.platform
-          .saveFile(fileName: 'program.bf', allowedExtensions: ['bf']);
-      if (result != null) {
-        tab.path = result;
-      } else {
-        return;
-      }
+  Future<void> saveFile(List<EditorTab> tabs, int currentTabIndex,
+      Function(String) callback, Function(String) compileOOPtoBrainfuck) async {
+    if (currentTabIndex < 0 || currentTabIndex >= tabs.length) {
+      callback('\x1b[31mNo file selected\x1b[0m\n');
+      return;
     }
-    await File(tab.path)
-        .writeAsString(compileOOPtoBrainfuck(tab.controller.text));
-    tab.isSaved = true;
-    callback('\x1b[32mSaved to ${tab.path}\x1b[0m\n');
+    final editorTab = tabs[currentTabIndex];
+    String? outputFile = await FilePicker.platform.saveFile(
+      dialogTitle: 'Save Brainfuck File',
+      fileName: editorTab.path.isEmpty
+          ? 'untitled.bf'
+          : editorTab.path.split('/').last,
+      type: FileType.custom,
+      allowedExtensions: ['bf'],
+    );
+    if (outputFile != null) {
+      await File(outputFile).writeAsString(editorTab.controller.text);
+      editorTab.path = outputFile;
+      editorTab.isSaved = true;
+      callback('\x1b[32mSaved to $outputFile\x1b[0m\n');
+    }
   }
 
   Future<void> createProject(Function(String, String) callback) async {
@@ -56,8 +56,7 @@ class ProjectService {
       final projectFile = File('$result/brainfuck.yaml');
       await projectFile.writeAsString(
           'name: Brainfuck Project\nversion: 1.0\nfiles:\n  - main.bf');
-      await File('$result/main.bf').writeAsString(
-          'class HelloWorld { init() { print("Hello, World!"); } }');
+      await File('$result/main.bf').writeAsString('Brain Fuck Programming');
       callback(result, '\x1b[32mCreated project: $result\x1b[0m\n');
     }
   }
